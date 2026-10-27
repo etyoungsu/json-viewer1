@@ -33,29 +33,53 @@
     }
     if (moveFocus) $(next+'-tab').focus();
   }
-  for (const name of ['input', 'output']) $(name+'-tab').onclick = () => setPane(name);
-  document.querySelector('.workspace-tabs').addEventListener('keydown', event => {
+  function activatePane(next, focusTab = false) {
+    if (next === 'output' && (dirty || !result)) {
+      // Reuse a valid, unchanged tree so tab switching preserves its open nodes.
+      if (!source.value.trim()) {
+        empty(false);
+        setPane('output', focusTab);
+      } else {
+        format();
+        if (focusTab) $('output-tab').focus();
+      }
+      return;
+    }
+    setPane(next, focusTab);
+  }
+  for (const name of ['input', 'output']) $(name+'-tab').onclick = () => activatePane(name);
+  document.querySelector('.workspace-tablist').addEventListener('keydown', event => {
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     event.preventDefault();
     const next = event.key === 'Home' ? 'input' : event.key === 'End' ? 'output' : $('input-panel').hidden ? 'input' : 'output';
-    setPane(next, true);
+    activatePane(next, true);
   });
-  const workspace = document.querySelector('.workspace');
-  const expandWorkspace = $('expand-workspace');
-  function setExpanded(expanded) {
-    workspace.classList.toggle('expanded', expanded);
-    document.body.classList.toggle('workspace-expanded', expanded);
-    expandWorkspace.setAttribute('aria-pressed', String(expanded));
-    expandWorkspace.title = expanded ? 'Restore workspace (Esc)' : 'Expand workspace';
-    expandWorkspace.querySelector('span').textContent = expanded ? 'Restore' : 'Expand';
-    document.querySelectorAll('.site-header,.intro,.under-workspace,.tips,.site-footer').forEach(node => node.inert = expanded);
+  $('theme-toggle').addEventListener('click', () => {
+    const dark = document.documentElement.dataset.theme !== 'dark';
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    $('theme-toggle').setAttribute('aria-pressed', String(dark));
+  });
+  const wrapToggle = $('wrap-lines');
+  wrapToggle.addEventListener('change', () => {
+    document.querySelector('.workspace').classList.toggle('wrap-lines', wrapToggle.checked);
+    source.wrap = wrapToggle.checked ? 'soft' : 'off';
+    source.scrollLeft = 0;
+    $('result-area').scrollLeft = 0;
+    $('gutter').scrollTop = source.scrollTop;
+  });
+  // Measure the selected position using the textarea's current visual wrapping.
+  function scrollToOffset(offset) {
+    const style = getComputedStyle(source), mirror = el('div');
+    for (const name of ['font','lineHeight','letterSpacing','tabSize','padding','boxSizing','whiteSpace','overflowWrap','wordBreak']) mirror.style[name] = style[name];
+    mirror.style.position = 'fixed';
+    mirror.style.visibility = 'hidden';
+    mirror.style.width = source.clientWidth + 'px';
+    mirror.textContent = source.value.slice(0, offset);
+    const marker = el('span', '', '\u200b');
+    mirror.append(marker);document.body.append(mirror);
+    source.scrollTop = Math.max(0, marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top - source.clientHeight / 3);
+    mirror.remove();$('gutter').scrollTop = source.scrollTop;
   }
-  expandWorkspace.onclick = () => setExpanded(!workspace.classList.contains('expanded'));
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && workspace.classList.contains('expanded')) {
-      setExpanded(false); expandWorkspace.focus();
-    }
-  });
   function spanText(className, text) {
     const span=el('span',className);
     if(!query) {span.textContent=text;return span;}
@@ -78,7 +102,7 @@
         if(loaded)return;loaded=true;
         const children=el('div','node-children');let index=0;
         const list=entries(node).filter(item=>!query||visible.has(path+'/'+item.index));
-        const more=el('button','load-more');more.style.cssText='font-size:10px;color:#8c70c2;margin:4px 0 4px 20px';
+        const more=el('button','load-more');more.style.cssText='font-size:10px;margin:4px 0 4px 20px';
         function page() {
           more.remove();const end=Math.min(index+PAGE_SIZE,list.length);
           for(;index<end;index++) {const item=list[index]; children.append(renderNode(item.node,item.key!==null?item.key:String(item.index),depth+1,path+'/'+item.index));}
@@ -110,7 +134,7 @@
     $('search-count').textContent=query?matches.size.toLocaleString()+' matches':'';
     const records=result.records.map((node,i)=>({node,i})).filter(item=>!query||visible.has(String(item.i)));
     let recordIndex=0;
-    const moreRecords=el('button','load-more');moreRecords.style.cssText='font-size:11px;color:#8c70c2;margin:8px';
+    const moreRecords=el('button','load-more');moreRecords.style.cssText='font-size:11px;margin:8px';
     function recordPage() {
       moreRecords.remove();const end=Math.min(recordIndex+PAGE_SIZE,records.length);
       for(;recordIndex<end;recordIndex++) {
@@ -134,7 +158,7 @@
       const start=Math.max(0,error.column-60);box.append(el('pre','',(start?'…':'')+line.slice(start,start+150)));
       const jump=el('button','','Go to error');jump.onclick=()=>{
         const normalized=source.value;const lines=normalized.split('\n');const offset=lines.slice(0,error.line-1).reduce((n,s)=>n+s.length+1,0)+error.column-1;
-        setPane('input');source.focus();source.setSelectionRange(offset,offset+1);source.scrollTop=Math.max(0,(error.line-4)*25);$('gutter').scrollTop=source.scrollTop;
+        setPane('input');source.focus();source.setSelectionRange(offset,offset+1);scrollToOffset(offset);
       };box.append(jump);
     }
     $('result-status').textContent='Invalid input';$('result-count').textContent='—';$('input-type').textContent='AUTO';controls();setPane('output');
@@ -184,6 +208,6 @@
   };
   $('file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try {if(file.size>MAX_BYTES)throw new Error('Choose a file that is 10 MB or smaller.');source.value=await file.text();format();}catch(error){toast(error.message);}event.target.value='';};
   $('upload-label').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('file').click();}});
-  if(/Mac|iPhone|iPad/.test(navigator.platform)){$('shortcut').textContent='⌘ ↵';$('footer-shortcut').textContent='⌘';}
+  if(/Mac|iPhone|iPad/.test(navigator.platform)){$('shortcut').textContent='⌘ ↵';}
   empty(false);
 })();

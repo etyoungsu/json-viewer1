@@ -9,6 +9,57 @@
   const prettyBytes = size => size >= 1048576 ? (size / 1048576).toFixed(2)+' MB' : size >= 1024 ? (size/1024).toFixed(1)+' KB' : size+' B';
   function el(tag, className, content) { const node = document.createElement(tag); if(className)node.className=className;if(content!==undefined)node.textContent=content;return node; }
   function toast(message) { clearTimeout(toastTimer); $('toast').textContent=message; $('toast').classList.add('show'); toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2600); }
+  // IndexedDB keeps larger drafts without localStorage's small string quota.
+  let draftRevision = 0;
+  const draftKey = location.pathname.replace(/index\.html$/, '');
+  const draftDB = new Promise((resolve, reject) => {
+    try {
+      const request = indexedDB.open('json-studio-drafts', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('drafts');
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('Draft storage is blocked.'));
+    } catch (error) { reject(error); }
+  });
+  function saveDraft() {
+    const revision = ++draftRevision, value = source.value;
+    $('draft-status').textContent = 'Saving…';
+    draftDB.then(db => new Promise((resolve, reject) => {
+      const transaction = db.transaction('drafts', 'readwrite');
+      const store = transaction.objectStore('drafts');
+      if (value) store.put(value, draftKey); else store.delete(draftKey);
+      transaction.oncomplete = resolve;
+      transaction.onabort = () => reject(transaction.error);
+      transaction.onerror = () => reject(transaction.error);
+    })).then(() => {
+      if (revision === draftRevision) $('draft-status').textContent = value ? 'Saved locally' : '';
+    }).catch(() => {
+      if (revision === draftRevision) $('draft-status').textContent = 'Could not save locally';
+    });
+  }
+  function restoreDraft() {
+    $('draft-status').textContent = 'Loading saved input…';
+    draftDB.then(db => new Promise((resolve, reject) => {
+      const transaction = db.transaction('drafts', 'readonly');
+      const request = transaction.objectStore('drafts').get(draftKey);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+      transaction.onabort = () => reject(transaction.error);
+    })).then(value => {
+      // Never overwrite text entered while the stored draft was being loaded.
+      if (draftRevision) return;
+      if (typeof value === 'string' && value) {
+        source.value = value; dirty = true; updateSource(); controls();
+        $('draft-status').textContent = 'Saved locally';
+      } else $('draft-status').textContent = '';
+    }).catch(() => {
+      if (!draftRevision) $('draft-status').textContent = 'Local saving unavailable';
+    });
+  }
   function updateSource() {
     const lines = source.value.split('\n').length;
     $('gutter').textContent = Array.from({length:Math.min(lines,100000)},(_,i)=>i+1).join('\n');
@@ -95,8 +146,9 @@
     row.append(el('span',container?'twisty':'leaf-space'));
     if(label!==null) row.append(spanText('key',label),el('span','punctuation',': '));
     if(container) {
+      outer.dataset.bracketLevel = String(depth % 3);
       const open=node.kind==='object'?'{':'[',close=node.kind==='object'?'}':']';
-      row.append(el('span','punctuation',open),el('span','node-preview',node.children.length?' … '+close:close),el('span','node-meta',node.children.length+' '+(node.kind==='object'?'keys':'items')));
+      row.append(el('span','punctuation bracket',open),el('span','node-preview',node.children.length?' … '+close:close),el('span','node-meta',node.children.length+' '+(node.kind==='object'?'keys':'items')));
       outer.append(row); let loaded=false;
       function populate() {
         if(loaded)return;loaded=true;
@@ -177,12 +229,14 @@
       $('result-count').textContent=result.format==='JSONL'?result.records.length.toLocaleString()+' records · one record per line':(result.records[0].children?result.records[0].children.length+' '+(result.records[0].kind==='object'?'keys':'items'):'1 value');
       controls();
     } catch(error) {showError(error);}
+    saveDraft();
   }
-  function empty(shouldFocus = true) {
+  function empty(shouldFocus = true, persist = true) {
     source.value='';result=null;dirty=false;query='';search.value='';clearTimeout(searchTimer);$('search-count').textContent='';tree.replaceChildren();tree.hidden=true;$('error').hidden=true;$('empty').hidden=false;
     $('input-type').textContent='AUTO';$('result-status').textContent='Ready';$('result-count').textContent='—';updateSource();controls();setPane('input');if(shouldFocus)source.focus();
+    if (persist) saveDraft();
   }
-  source.addEventListener('input',()=>{dirty=true;updateSource();controls();});
+  source.addEventListener('input',()=>{dirty=true;updateSource();controls();saveDraft();});
   source.addEventListener('scroll',()=>{$('gutter').scrollTop=source.scrollTop;});
   source.addEventListener('keydown',event=>{if(event.key==='Tab'){event.preventDefault();source.setRangeText('  ',source.selectionStart,source.selectionEnd,'end');source.dispatchEvent(new Event('input'));}});
   document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();format();}});
@@ -209,5 +263,6 @@
   $('file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try {if(file.size>MAX_BYTES)throw new Error('Choose a file that is 10 MB or smaller.');source.value=await file.text();format();}catch(error){toast(error.message);}event.target.value='';};
   $('upload-label').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('file').click();}});
   if(/Mac|iPhone|iPad/.test(navigator.platform)){$('shortcut').textContent='⌘ ↵';}
-  empty(false);
+  empty(false, false);
+  restoreDraft();
 })();

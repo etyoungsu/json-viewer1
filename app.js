@@ -83,6 +83,7 @@
       $(name+'-tab').classList.toggle('selected', active);
     }
     if (moveFocus) $(next+'-tab').focus();
+    queueOutline(true);
   }
   function activatePane(next, focusTab = false) {
     if (next === 'output' && (dirty || !result)) {
@@ -109,6 +110,7 @@
     const dark = document.documentElement.dataset.theme !== 'dark';
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     $('theme-toggle').setAttribute('aria-pressed', String(dark));
+    stickySignature='';queueOutline(true);
   });
   const wrapToggle = $('wrap-lines');
   wrapToggle.addEventListener('change', () => {
@@ -117,6 +119,7 @@
     source.scrollLeft = 0;
     $('result-area').scrollLeft = 0;
     $('gutter').scrollTop = source.scrollTop;
+    queueOutline(true);
   });
   // Measure the selected position using the textarea's current visual wrapping.
   function scrollToOffset(offset) {
@@ -139,33 +142,129 @@
     span.append(document.createTextNode(text.slice(start)));return span;
   }
   function entries(node) { return node.children.map((item,i)=>node.kind==='object'?{node:item.node,key:item.key.raw,index:i}:{node:item,key:null,index:i}); }
+  let lineMap = new WeakMap();
+  function indexLines() {
+    lineMap = new WeakMap(); let line = 1;
+    function visit(node) {
+      const info = {start:line++, end:0};
+      lineMap.set(node, info);
+      if (node.children && node.children.length) {
+        for (const item of entries(node)) visit(item.node);
+        info.end = line++;
+      } else info.end = info.start;
+    }
+    result.records.forEach(visit);
+  }
+  function editorLine(tag, line, depth, className = 'node-row') {
+    const row = el(tag, className + ' editor-line');
+    row.append(el('span', 'line-number', String(line)));
+    row.firstChild.setAttribute('aria-hidden', 'true');
+    const fold = el('span', 'fold-slot'); fold.setAttribute('aria-hidden','true');
+    const code = el('span', 'line-code');
+    code.style.setProperty('--depth', depth);
+    row.append(fold, code);
+    return {row, fold, code};
+  }
+  const resultArea = $('result-area'), stickyContext = $('sticky-context');
+  let outlineRows = [], outlineDirty = true, outlineFrame = 0, stickySignature = '';
+  function queueOutline(rebuild = false) {
+    outlineDirty = outlineDirty || rebuild;
+    if (!outlineFrame) outlineFrame = requestAnimationFrame(updateOutline);
+  }
+  function updateOutline() {
+    outlineFrame = 0;
+    if ($('output-panel').hidden || tree.hidden) {
+      stickyContext.replaceChildren(); stickySignature = ''; return;
+    }
+    const top = resultArea.getBoundingClientRect().top;
+    if (outlineDirty) {
+      outlineRows = Array.from(tree.querySelectorAll('.editor-line'))
+        .filter(row => row.getClientRects().length)
+        .map(row => ({row, top:row.getBoundingClientRect().top - top + resultArea.scrollTop,
+          bottom:row.getBoundingClientRect().bottom - top + resultArea.scrollTop}));
+      outlineDirty = false;
+    }
+    const limit = Math.max(1, Math.min(4, Math.floor(resultArea.clientHeight / 100)));
+    let shown = [], probe = resultArea.scrollTop + 1;
+    // Account for the pinned rows covering the top of the scrolling content.
+    for (let pass = 0; pass < 4; pass++) {
+      let low = 0, high = outlineRows.length;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        if (outlineRows[mid].bottom <= probe) low = mid + 1; else high = mid;
+      }
+      const anchor = outlineRows[low]?.row, ancestors = [];
+      let detail = anchor?.closest('details');
+      while (detail && tree.contains(detail)) {
+        const header = detail.querySelector(':scope > summary');
+        if (detail.open && header.getBoundingClientRect().top < top + shown.length * 25 - 1) ancestors.unshift(header);
+        detail = detail.parentElement.closest('details');
+      }
+      shown = ancestors.slice(-limit);
+      const nextProbe = resultArea.scrollTop + shown.length * 25 + 1;
+      if (nextProbe === probe) break;
+      probe = nextProbe;
+    }
+    const signature = shown.map(row => row.dataset.path).join('|');
+    if (signature === stickySignature) return;
+    stickySignature = signature;stickyContext.replaceChildren();
+    if (!shown.length) return;
+    const panel = el('div','sticky-panel');
+    for (const header of shown) {
+      const button = el('button','context-line editor-line');
+      for (const part of header.children) button.append(part.cloneNode(true));
+      button.style.setProperty('--bracket', getComputedStyle(header).getPropertyValue('--bracket'));
+      button.title = 'Go to this parent';
+      button.setAttribute('aria-label', 'Go to parent at line ' + header.firstChild.textContent);
+      button.onclick = () => {
+        const position = header.getBoundingClientRect().top - resultArea.getBoundingClientRect().top + resultArea.scrollTop;
+        resultArea.scrollTop = Math.max(0, position); header.focus();queueOutline();
+      };
+      panel.append(button);
+    }
+    stickyContext.append(panel);
+  }
+  resultArea.addEventListener('scroll', () => queueOutline());
+  new ResizeObserver(() => queueOutline(true)).observe(resultArea);
+  tree.addEventListener('toggle', () => queueOutline(true), true);
   function renderNode(node, label, depth, path, forceOpen=false) {
     renderCount++;
     const container=!!node.children, outer=el(container?'details':'div','node');
-    const row=el(container?'summary':'div','node-row');
-    row.append(el('span',container?'twisty':'leaf-space'));
-    if(label!==null) row.append(spanText('key',label),el('span','punctuation',': '));
+    const info = lineMap.get(node);
+    const {row,fold,code} = editorLine(container?'summary':'div', info.start, depth);
+    row.dataset.path = path;
+    if (container) {
+      fold.classList.add('twisty');
+      row.setAttribute('aria-label', 'Toggle ' + (label === null ? 'root' : label) + ' at line ' + info.start);
+    }
+    if(label!==null) code.append(spanText('key',label),el('span','punctuation',': '));
     if(container) {
       outer.dataset.bracketLevel = String(depth % 3);
+      if (!node.children.length) outer.classList.add('node-empty');
       const open=node.kind==='object'?'{':'[',close=node.kind==='object'?'}':']';
-      row.append(el('span','punctuation bracket',open),el('span','node-preview',node.children.length?' … '+close:close),el('span','node-meta',node.children.length+' '+(node.kind==='object'?'keys':'items')));
+      code.append(el('span','punctuation bracket',open),el('span','node-preview',node.children.length?' … '+close:close),el('span','node-meta',node.children.length+' '+(node.kind==='object'?'keys':'items')));
       outer.append(row); let loaded=false;
       function populate() {
         if(loaded)return;loaded=true;
+        if (!node.children.length) return;
         const children=el('div','node-children');let index=0;
         const list=entries(node).filter(item=>!query||visible.has(path+'/'+item.index));
-        const more=el('button','load-more');more.style.cssText='font-size:10px;margin:4px 0 4px 20px';
+        const more=el('button','load-more');more.style.cssText='font-size:10px;margin:4px 0 4px 76px';
         function page() {
           more.remove();const end=Math.min(index+PAGE_SIZE,list.length);
           for(;index<end;index++) {const item=list[index]; children.append(renderNode(item.node,item.key!==null?item.key:String(item.index),depth+1,path+'/'+item.index));}
           if(index<list.length) {more.textContent='Show next '+Math.min(PAGE_SIZE,list.length-index)+' items ('+(list.length-index)+' remaining)';children.append(more);}
+          queueOutline(true);
         }
-        more.addEventListener('click',page);page();outer.append(children,el('div','node-close',close));
+        more.addEventListener('click',page);page();
+        const closing = editorLine('div', info.end, depth, 'node-close');
+        closing.code.textContent = close;
+        outer.append(children, closing.row);
       }
       outer._populate=populate;
       outer.addEventListener('toggle',()=>{if(outer.open)populate();});
       if(depth<2||forceOpen||query) {outer.open=true;populate();}
-    } else {row.append(spanText('value-'+node.kind,node.raw));outer.append(row);}
+    } else {code.append(spanText('value-'+node.kind,node.raw));outer.append(row);}
     return outer;
   }
   function searchIndex() {
@@ -180,7 +279,7 @@
     result.records.forEach((node,i)=>visit(node,null,String(i)));
   }
   function drawTree() {
-    tree.replaceChildren();renderCount=0;
+    tree.replaceChildren();renderCount=0;stickySignature='';stickyContext.replaceChildren();queueOutline(true);
     if(!result)return;
     if(query)searchIndex();
     $('search-count').textContent=query?matches.size.toLocaleString()+' matches':'';
@@ -201,7 +300,7 @@
     if(query&&!matches.size)tree.append(el('p','node-meta','No matches found.'));
   }
   function showError(error) {
-    result=null;dirty=false;tree.replaceChildren();tree.hidden=true;$('empty').hidden=true;
+    result=null;dirty=false;tree.replaceChildren();tree.hidden=true;stickyContext.replaceChildren();stickySignature='';$('empty').hidden=true;
     const box=$('error');box.replaceChildren();box.hidden=false;
     box.append(el('strong','',error.isJSONL?'Check your JSONL records':'Check your JSON syntax'),el('div','',error.message));
     if(error.line) {
@@ -219,7 +318,7 @@
     clearTimeout(searchTimer);query='';search.value='';$('search-count').textContent='';
     try {
       if(bytes(source.value)>MAX_BYTES)throw new Error('Input must be 10 MB or smaller.');
-      result=parser.detect(source.value);dirty=false;
+      result=parser.detect(source.value);dirty=false;indexLines();
       const output=parser.serialize(result,2);
       if(result.format==='JSON')source.value=output;
       updateSource();$('error').hidden=true;$('empty').hidden=true;
@@ -232,7 +331,7 @@
     saveDraft();
   }
   function empty(shouldFocus = true, persist = true) {
-    source.value='';result=null;dirty=false;query='';search.value='';clearTimeout(searchTimer);$('search-count').textContent='';tree.replaceChildren();tree.hidden=true;$('error').hidden=true;$('empty').hidden=false;
+    source.value='';result=null;dirty=false;stickyContext.replaceChildren();stickySignature='';query='';search.value='';clearTimeout(searchTimer);$('search-count').textContent='';tree.replaceChildren();tree.hidden=true;$('error').hidden=true;$('empty').hidden=false;
     $('input-type').textContent='AUTO';$('result-status').textContent='Ready';$('result-count').textContent='—';updateSource();controls();setPane('input');if(shouldFocus)source.focus();
     if (persist) saveDraft();
   }

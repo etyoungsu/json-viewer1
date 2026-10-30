@@ -1,5 +1,5 @@
 'use strict';
-importScripts('./parser.js','./tree-model.js');
+importScripts('./parser.js','./markdown.js','./tree-model.js');
 let model=null;
 self.onmessage=async({data:m})=>{
   const reply=(type,payload={})=>self.postMessage({type,id:m.id,...payload});

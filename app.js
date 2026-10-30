@@ -1,5 +1,6 @@
 (() => {
 'use strict';
+const BUILD_VERSION='1a188a0612dba455';
 const $=id=>document.getElementById(id), source=$('source'), tree=$('tree'), area=$('result-area'), sticky=$('sticky-context');
 let charWidth=8,worker=null,serial=0,loadId=0,viewportId=0,layoutId=0,meta=null,dirty=false,busy=false,query='',toastTimer,searchTimer,frame=0,statsTimer;
 const pending=new Map(),ROW=25,SCROLL_CAP=8000000;
@@ -23,11 +24,12 @@ function activate(next,focus=false){if(next==='output'&&(dirty||!meta)&&!busy){i
 for(const name of ['input','output'])$(name+'-tab').onclick=()=>activate(name);
 document.querySelector('.workspace-tablist').onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();activate(e.key==='Home'?'input':e.key==='End'?'output':$('input-panel').hidden?'input':'output',true);};
 function stopWorker(){if(worker)worker.terminate();worker=null;for(const request of pending.values())request.reject(Error('Operation cancelled.'));pending.clear();loadId=viewportId=layoutId=0;}
-function startWorker(){stopWorker();worker=new Worker('./worker.js');worker.onmessage=({data:m})=>{
+function startWorker(){stopWorker();worker=new Worker('./worker.js?v=1a188a0612dba455');worker.onmessage=({data:m})=>{
+ if(m.version!==BUILD_VERSION||((m.type==='ready'||m.type==='layout')&&typeof m.meta?.markdown!=='boolean')){showError({message:'Application files are out of date. Replace all deployment files and reload the page.'});stopWorker();setBusy(false);return;}
  if(m.type==='progress'){if(m.id===loadId||pending.has(m.id))setBusy(true,m.message);return;}
  if(m.type==='error'){if(pending.has(m.id)){pending.get(m.id).reject(Error(m.error.message));pending.delete(m.id);setBusy(false);}else if(m.id===loadId){showError(m.error);setBusy(false);}return;}
  if(m.type==='ready'&&m.id===loadId){if(m.input!==undefined){source.value=m.input;saveDraft();}meta=m.meta;dirty=false;query='';$('search').value='';$('search-count').textContent='';applyMeta();updateSource(m);$('error').hidden=true;$('empty').hidden=true;tree.hidden=false;setBusy(false);area.scrollTop=0;setPane('output');configure();}
- if(m.type==='layout'&&m.id===layoutId){meta=m.meta;query=meta.query;applyMeta();setBusy(false);requestView();}
+ if(m.type==='layout'&&m.id===layoutId){meta=m.meta;query=meta.query;if(meta.markdown!==$('markdown-values').checked){setBusy(false);configure();return;}applyMeta();setBusy(false);requestView();}
  if(m.type==='viewport'&&m.id===viewportId){renderView(m);}
  if(m.type==='export'&&pending.has(m.id)){pending.get(m.id).resolve(m);pending.delete(m.id);setBusy(false);}
 };worker.onerror=e=>{showError({message:e.message||'Background processing failed. Try a smaller file or reload this page.'});stopWorker();setBusy(false);};}

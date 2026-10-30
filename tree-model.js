@@ -57,7 +57,7 @@ class TreeModel {
     if(action==='expand'||action==='collapse')for(const item of this.nodes)item.expanded=action==='expand';
     this.layout();return this.meta();
   }
-  meta(){return {format:this.result.format,records:this.roots.length,nodes:this.nodes.length,totalLines:this.totalLines,visualLines:this.visualLines,matches:this.matches,maxColumns:this.maxColumns,query:this.query};}
+  meta(){return {markdown:this.markdown,format:this.result.format,records:this.roots.length,nodes:this.nodes.length,totalLines:this.totalLines,visualLines:this.visualLines,matches:this.matches,maxColumns:this.maxColumns,query:this.query};}
   rowAt(visual){let lo=0,hi=this.rows.length;while(lo<hi){const mid=(lo+hi)>>1,r=this.rows[mid];if(r.visual+r.count<=visual)lo=mid+1;else hi=mid;}return lo;}
   describe(row,fragment=0,clip=null){
     const item=this.nodes[row.id];let a=row.breaks[fragment],b=row.breaks[fragment+1],clipStart=0;if(clip){clipStart=Math.max(0,Math.floor(clip.start)-Math.min(item.depth*2,40)-8);a=row.breaks[fragment]+clipStart;b=Math.min(b,a+clip.count+24);}let offset=0;const tokens=[];

@@ -1,8 +1,9 @@
 'use strict';
-importScripts('./parser.js','./markdown.js','./tree-model.js');
+const BUILD_VERSION='1a188a0612dba455';
+importScripts('./parser.js?v=1a188a0612dba455','./markdown.js?v=1a188a0612dba455','./tree-model.js?v=1a188a0612dba455');
 let model=null;
 self.onmessage=async({data:m})=>{
-  const reply=(type,payload={})=>self.postMessage({type,id:m.id,...payload});
+  const reply=(type,payload={})=>self.postMessage({version:BUILD_VERSION,type,id:m.id,...payload});
   try{
     if(m.type==='load'){
       reply('progress',{message:m.file?'Reading file…':'Parsing input…'});

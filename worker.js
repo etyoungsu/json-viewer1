@@ -1,6 +1,6 @@
 'use strict';
-const BUILD_VERSION='1a188a0612dba455';
-importScripts('./parser.js?v=1a188a0612dba455','./markdown.js?v=1a188a0612dba455','./tree-model.js?v=1a188a0612dba455');
+const BUILD_VERSION='acd28c9f12f402c0';
+importScripts('./parser.js?v=acd28c9f12f402c0','./markdown.js?v=acd28c9f12f402c0','./tree-model.js?v=acd28c9f12f402c0');
 let model=null;
 self.onmessage=async({data:m})=>{
   const reply=(type,payload={})=>self.postMessage({version:BUILD_VERSION,type,id:m.id,...payload});
@@ -15,6 +15,7 @@ self.onmessage=async({data:m})=>{
       let lines=1;for(let p=0;p<text.length;p++)if(text.charCodeAt(p)===10)lines++;
       reply('ready',{meta:model.meta(),input:m.file?text:undefined,bytes:new Blob([text]).size,lines});
     }else if(m.type==='layout')reply('layout',{meta:model.configure(m.layout)});
+    else if(m.type==='navigate')reply('navigate',{navigation:model.navigate(m.step)});
     else if(m.type==='viewport')reply('viewport',{...model.viewport(m.start,m.count,m.horizontal,m.anchor),start:m.start});
     else if(m.type==='export'){
       reply('progress',{message:'Preparing '+(m.download?'download':'clipboard')+'…'});

@@ -20,6 +20,10 @@ function response(worker,id,type){return new Promise((resolve,reject)=>{const ti
  promise=response(worker,9,'layout');worker.postMessage({type:'layout',id:9,layout:{markdown:false}});assert.equal((await promise).meta.markdown,false);
  promise=response(worker,10,'viewport');worker.postMessage({type:'viewport',id:10,start:0,count:50});const rawView=await promise;assert(rawView.rows.some(r=>r.tokens.some(t=>t.type==='value-string'&&t.text.includes('**deep value**'))));
  console.log('PASS versioned worker applies Markdown before parsing and to deeply nested values, then reverses it');
+ promise=response(worker,11,'layout');worker.postMessage({type:'layout',id:11,layout:{query:'curr_prompt'}});assert.equal((await promise).meta.navigation.total,2);
+ promise=response(worker,12,'navigate');worker.postMessage({type:'navigate',id:12,step:-1});const navigation=(await promise).navigation;assert.equal(navigation.index,1);
+ promise=response(worker,13,'viewport');worker.postMessage({type:'viewport',id:13,start:navigation.target.visual,count:10});assert((await promise).rows.some(r=>r.tokens.some(t=>t.matches.some(match=>match.active))));
+ console.log('PASS worker navigation returns a target and active-match ranges');
  await worker.terminate();
  const cancelled=create();cancelled.postMessage({type:'load',id:5,text:'"'+'x'.repeat(16*1024*1024)+'"'});await cancelled.terminate();console.log('PASS in-flight worker can be terminated');
 })().catch(e=>{console.error(e);process.exitCode=1;});

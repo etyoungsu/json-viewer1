@@ -1,367 +1,64 @@
 (() => {
-  'use strict';
-  const $ = id => document.getElementById(id), parser = window.JSONStudioParser;
-  const source = $('source'), tree = $('tree'), search = $('search');
-  let result = null, dirty = false, toastTimer, searchTimer, renderCount = 0;
-  let matches = new Set(), visible = new Set(), query = '';
-  const MAX_BYTES = 10 * 1024 * 1024, PAGE_SIZE = 150, EXPAND_BUDGET = 10000;
-  const bytes = text => new TextEncoder().encode(text).length;
-  const prettyBytes = size => size >= 1048576 ? (size / 1048576).toFixed(2)+' MB' : size >= 1024 ? (size/1024).toFixed(1)+' KB' : size+' B';
-  function el(tag, className, content) { const node = document.createElement(tag); if(className)node.className=className;if(content!==undefined)node.textContent=content;return node; }
-  function toast(message) { clearTimeout(toastTimer); $('toast').textContent=message; $('toast').classList.add('show'); toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2600); }
-  // IndexedDB keeps larger drafts without localStorage's small string quota.
-  let draftRevision = 0;
-  const draftKey = location.pathname.replace(/index\.html$/, '');
-  const draftDB = new Promise((resolve, reject) => {
-    try {
-      const request = indexedDB.open('json-studio-drafts', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('drafts');
-      request.onsuccess = () => {
-        const db = request.result;
-        db.onversionchange = () => db.close();
-        resolve(db);
-      };
-      request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error('Draft storage is blocked.'));
-    } catch (error) { reject(error); }
-  });
-  function saveDraft() {
-    const revision = ++draftRevision, value = source.value;
-    $('draft-status').textContent = 'Saving…';
-    draftDB.then(db => new Promise((resolve, reject) => {
-      const transaction = db.transaction('drafts', 'readwrite');
-      const store = transaction.objectStore('drafts');
-      if (value) store.put(value, draftKey); else store.delete(draftKey);
-      transaction.oncomplete = resolve;
-      transaction.onabort = () => reject(transaction.error);
-      transaction.onerror = () => reject(transaction.error);
-    })).then(() => {
-      if (revision === draftRevision) $('draft-status').textContent = value ? 'Saved locally' : '';
-    }).catch(() => {
-      if (revision === draftRevision) $('draft-status').textContent = 'Could not save locally';
-    });
-  }
-  function restoreDraft() {
-    $('draft-status').textContent = 'Loading saved input…';
-    draftDB.then(db => new Promise((resolve, reject) => {
-      const transaction = db.transaction('drafts', 'readonly');
-      const request = transaction.objectStore('drafts').get(draftKey);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      transaction.onabort = () => reject(transaction.error);
-    })).then(value => {
-      // Never overwrite text entered while the stored draft was being loaded.
-      if (draftRevision) return;
-      if (typeof value === 'string' && value) {
-        source.value = value; dirty = true; updateSource(); controls();
-        $('draft-status').textContent = 'Saved locally';
-      } else $('draft-status').textContent = '';
-    }).catch(() => {
-      if (!draftRevision) $('draft-status').textContent = 'Local saving unavailable';
-    });
-  }
-  function updateSource() {
-    const lines = source.value.split('\n').length;
-    $('gutter').textContent = Array.from({length:Math.min(lines,100000)},(_,i)=>i+1).join('\n');
-    $('source-stats').textContent = lines.toLocaleString()+(lines===1?' line · ':' lines · ')+prettyBytes(bytes(source.value));
-    $('gutter').scrollTop=source.scrollTop;
-  }
-  function controls() {
-    $('stale').hidden=!dirty||!result;
-    for(const id of ['copy','download']) $(id).disabled=!result||dirty;
-    for(const id of ['expand','collapse']) $(id).disabled=!result;
-    search.disabled=!result;
-  }
-  function setPane(next, focusTab = false) {
-    const previousPanel = document.querySelector('.pane:not([hidden])');
-    const moveFocus = focusTab || (previousPanel && previousPanel.id !== next+'-panel' && previousPanel.contains(document.activeElement));
-    for (const name of ['input', 'output']) {
-      const active = name === next;
-      $(name+'-panel').hidden = !active;
-      $(name+'-tab').setAttribute('aria-selected', String(active));
-      $(name+'-tab').tabIndex = active ? 0 : -1;
-      $(name+'-tab').classList.toggle('selected', active);
-    }
-    if (moveFocus) $(next+'-tab').focus();
-    queueOutline(true);
-  }
-  function activatePane(next, focusTab = false) {
-    if (next === 'output' && (dirty || !result)) {
-      // Reuse a valid, unchanged tree so tab switching preserves its open nodes.
-      if (!source.value.trim()) {
-        empty(false);
-        setPane('output', focusTab);
-      } else {
-        format();
-        if (focusTab) $('output-tab').focus();
-      }
-      return;
-    }
-    setPane(next, focusTab);
-  }
-  for (const name of ['input', 'output']) $(name+'-tab').onclick = () => activatePane(name);
-  document.querySelector('.workspace-tablist').addEventListener('keydown', event => {
-    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === 'Home' ? 'input' : event.key === 'End' ? 'output' : $('input-panel').hidden ? 'input' : 'output';
-    activatePane(next, true);
-  });
-  $('theme-toggle').addEventListener('click', () => {
-    const dark = document.documentElement.dataset.theme !== 'dark';
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    $('theme-toggle').setAttribute('aria-pressed', String(dark));
-    stickySignature='';queueOutline(true);
-  });
-  const wrapToggle = $('wrap-lines');
-  wrapToggle.addEventListener('change', () => {
-    document.querySelector('.workspace').classList.toggle('wrap-lines', wrapToggle.checked);
-    source.wrap = wrapToggle.checked ? 'soft' : 'off';
-    source.scrollLeft = 0;
-    $('result-area').scrollLeft = 0;
-    $('gutter').scrollTop = source.scrollTop;
-    queueOutline(true);
-  });
-  // Measure the selected position using the textarea's current visual wrapping.
-  function scrollToOffset(offset) {
-    const style = getComputedStyle(source), mirror = el('div');
-    for (const name of ['font','lineHeight','letterSpacing','tabSize','padding','boxSizing','whiteSpace','overflowWrap','wordBreak']) mirror.style[name] = style[name];
-    mirror.style.position = 'fixed';
-    mirror.style.visibility = 'hidden';
-    mirror.style.width = source.clientWidth + 'px';
-    mirror.textContent = source.value.slice(0, offset);
-    const marker = el('span', '', '\u200b');
-    mirror.append(marker);document.body.append(mirror);
-    source.scrollTop = Math.max(0, marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top - source.clientHeight / 3);
-    mirror.remove();$('gutter').scrollTop = source.scrollTop;
-  }
-  function spanText(className, text) {
-    const span=el('span',className);
-    if(!query) {span.textContent=text;return span;}
-    const lower=text.toLocaleLowerCase();let start=0,index;
-    while((index=lower.indexOf(query,start))!==-1) {span.append(document.createTextNode(text.slice(start,index)),el('mark','',text.slice(index,index+query.length)));start=index+query.length;}
-    span.append(document.createTextNode(text.slice(start)));return span;
-  }
-  function entries(node) { return node.children.map((item,i)=>node.kind==='object'?{node:item.node,key:item.key.raw,index:i}:{node:item,key:null,index:i}); }
-  let lineMap = new WeakMap();
-  function indexLines() {
-    lineMap = new WeakMap(); let line = 1;
-    function visit(node) {
-      const info = {start:line++, end:0};
-      lineMap.set(node, info);
-      if (node.children && node.children.length) {
-        for (const item of entries(node)) visit(item.node);
-        info.end = line++;
-      } else info.end = info.start;
-    }
-    result.records.forEach(visit);
-  }
-  function editorLine(tag, line, depth, className = 'node-row') {
-    const row = el(tag, className + ' editor-line');
-    row.append(el('span', 'line-number', String(line)));
-    row.firstChild.setAttribute('aria-hidden', 'true');
-    const fold = el('span', 'fold-slot'); fold.setAttribute('aria-hidden','true');
-    const code = el('span', 'line-code');
-    code.style.setProperty('--depth', depth);
-    row.append(fold, code);
-    return {row, fold, code};
-  }
-  const resultArea = $('result-area'), stickyContext = $('sticky-context');
-  let outlineRows = [], outlineDirty = true, outlineFrame = 0, stickySignature = '';
-  function queueOutline(rebuild = false) {
-    outlineDirty = outlineDirty || rebuild;
-    if (!outlineFrame) outlineFrame = requestAnimationFrame(updateOutline);
-  }
-  function updateOutline() {
-    outlineFrame = 0;
-    if ($('output-panel').hidden || tree.hidden) {
-      stickyContext.replaceChildren(); stickySignature = ''; return;
-    }
-    const top = resultArea.getBoundingClientRect().top;
-    if (outlineDirty) {
-      outlineRows = Array.from(tree.querySelectorAll('.editor-line'))
-        .filter(row => row.getClientRects().length)
-        .map(row => ({row, top:row.getBoundingClientRect().top - top + resultArea.scrollTop,
-          bottom:row.getBoundingClientRect().bottom - top + resultArea.scrollTop}));
-      outlineDirty = false;
-    }
-    const limit = Math.max(1, Math.min(4, Math.floor(resultArea.clientHeight / 100)));
-    let shown = [], probe = resultArea.scrollTop + 1;
-    // Account for the pinned rows covering the top of the scrolling content.
-    for (let pass = 0; pass < 4; pass++) {
-      let low = 0, high = outlineRows.length;
-      while (low < high) {
-        const mid = (low + high) >> 1;
-        if (outlineRows[mid].bottom <= probe) low = mid + 1; else high = mid;
-      }
-      const anchor = outlineRows[low]?.row, ancestors = [];
-      let detail = anchor?.closest('details');
-      while (detail && tree.contains(detail)) {
-        const header = detail.querySelector(':scope > summary');
-        if (detail.open && header.getBoundingClientRect().top < top + shown.length * 25 - 1) ancestors.unshift(header);
-        detail = detail.parentElement.closest('details');
-      }
-      shown = ancestors.slice(-limit);
-      const nextProbe = resultArea.scrollTop + shown.length * 25 + 1;
-      if (nextProbe === probe) break;
-      probe = nextProbe;
-    }
-    const signature = shown.map(row => row.dataset.path).join('|');
-    if (signature === stickySignature) return;
-    stickySignature = signature;stickyContext.replaceChildren();
-    if (!shown.length) return;
-    const panel = el('div','sticky-panel');
-    for (const header of shown) {
-      const button = el('button','context-line editor-line');
-      for (const part of header.children) button.append(part.cloneNode(true));
-      button.style.setProperty('--bracket', getComputedStyle(header).getPropertyValue('--bracket'));
-      button.title = 'Go to this parent';
-      button.setAttribute('aria-label', 'Go to parent at line ' + header.firstChild.textContent);
-      button.onclick = () => {
-        const position = header.getBoundingClientRect().top - resultArea.getBoundingClientRect().top + resultArea.scrollTop;
-        resultArea.scrollTop = Math.max(0, position); header.focus();queueOutline();
-      };
-      panel.append(button);
-    }
-    stickyContext.append(panel);
-  }
-  resultArea.addEventListener('scroll', () => queueOutline());
-  new ResizeObserver(() => queueOutline(true)).observe(resultArea);
-  tree.addEventListener('toggle', () => queueOutline(true), true);
-  function renderNode(node, label, depth, path, forceOpen=false) {
-    renderCount++;
-    const container=!!node.children, outer=el(container?'details':'div','node');
-    const info = lineMap.get(node);
-    const {row,fold,code} = editorLine(container?'summary':'div', info.start, depth);
-    row.dataset.path = path;
-    if (container) {
-      fold.classList.add('twisty');
-      row.setAttribute('aria-label', 'Toggle ' + (label === null ? 'root' : label) + ' at line ' + info.start);
-    }
-    if(label!==null) code.append(spanText('key',label),el('span','punctuation',': '));
-    if(container) {
-      outer.dataset.bracketLevel = String(depth % 3);
-      if (!node.children.length) outer.classList.add('node-empty');
-      const open=node.kind==='object'?'{':'[',close=node.kind==='object'?'}':']';
-      code.append(el('span','punctuation bracket',open),el('span','node-preview',node.children.length?' … '+close:close),el('span','node-meta',node.children.length+' '+(node.kind==='object'?'keys':'items')));
-      outer.append(row); let loaded=false;
-      function populate() {
-        if(loaded)return;loaded=true;
-        if (!node.children.length) return;
-        const children=el('div','node-children');let index=0;
-        const list=entries(node).filter(item=>!query||visible.has(path+'/'+item.index));
-        const more=el('button','load-more');more.style.cssText='font-size:10px;margin:4px 0 4px 76px';
-        function page() {
-          more.remove();const end=Math.min(index+PAGE_SIZE,list.length);
-          for(;index<end;index++) {const item=list[index]; children.append(renderNode(item.node,item.key!==null?item.key:String(item.index),depth+1,path+'/'+item.index));}
-          if(index<list.length) {more.textContent='Show next '+Math.min(PAGE_SIZE,list.length-index)+' items ('+(list.length-index)+' remaining)';children.append(more);}
-          queueOutline(true);
-        }
-        more.addEventListener('click',page);page();
-        const closing = editorLine('div', info.end, depth, 'node-close');
-        closing.code.textContent = close;
-        outer.append(children, closing.row);
-      }
-      outer._populate=populate;
-      outer.addEventListener('toggle',()=>{if(outer.open)populate();});
-      if(depth<2||forceOpen||query) {outer.open=true;populate();}
-    } else {code.append(spanText('value-'+node.kind,node.raw));outer.append(row);}
-    return outer;
-  }
-  function searchIndex() {
-    matches=new Set();visible=new Set();
-    function visit(node,label,path) {
-      const text=(label||'')+' '+(node.kind==='string'?node.value:node.raw||'');
-      const own=text.toLocaleLowerCase().includes(query);let any=own;
-      if(own)matches.add(path);
-      if(node.children) for(const item of entries(node)) {const child=visit(item.node,item.key||String(item.index),path+'/'+item.index);any=child||any;}
-      if(any) visible.add(path);return any;
-    }
-    result.records.forEach((node,i)=>visit(node,null,String(i)));
-  }
-  function drawTree() {
-    tree.replaceChildren();renderCount=0;stickySignature='';stickyContext.replaceChildren();queueOutline(true);
-    if(!result)return;
-    if(query)searchIndex();
-    $('search-count').textContent=query?matches.size.toLocaleString()+' matches':'';
-    const records=result.records.map((node,i)=>({node,i})).filter(item=>!query||visible.has(String(item.i)));
-    let recordIndex=0;
-    const moreRecords=el('button','load-more');moreRecords.style.cssText='font-size:11px;margin:8px';
-    function recordPage() {
-      moreRecords.remove();const end=Math.min(recordIndex+PAGE_SIZE,records.length);
-      for(;recordIndex<end;recordIndex++) {
-        const {node,i}=records[recordIndex];
-        const record=el('div',result.format==='JSONL'?'record':'');
-        if(result.format==='JSONL') {const label=el('div','record-label');label.append(el('strong','',String(i+1).padStart(2,'0')),document.createTextNode(' / RECORD'));record.append(label);}
-        record.append(renderNode(node,null,0,String(i)));tree.append(record);
-      }
-      if(recordIndex<records.length){moreRecords.textContent='Show next '+Math.min(PAGE_SIZE,records.length-recordIndex)+' records ('+(records.length-recordIndex)+' remaining)';tree.append(moreRecords);}
-    }
-    moreRecords.onclick=recordPage;recordPage();
-    if(query&&!matches.size)tree.append(el('p','node-meta','No matches found.'));
-  }
-  function showError(error) {
-    result=null;dirty=false;tree.replaceChildren();tree.hidden=true;stickyContext.replaceChildren();stickySignature='';$('empty').hidden=true;
-    const box=$('error');box.replaceChildren();box.hidden=false;
-    box.append(el('strong','',error.isJSONL?'Check your JSONL records':'Check your JSON syntax'),el('div','',error.message));
-    if(error.line) {
-      box.append(el('div','','Line '+error.line+' · Column '+error.column));
-      const line=source.value.replace(/^\uFEFF/,'').split(/\r\n|\n|\r/)[error.line-1]||'';
-      const start=Math.max(0,error.column-60);box.append(el('pre','',(start?'…':'')+line.slice(start,start+150)));
-      const jump=el('button','','Go to error');jump.onclick=()=>{
-        const normalized=source.value;const lines=normalized.split('\n');const offset=lines.slice(0,error.line-1).reduce((n,s)=>n+s.length+1,0)+error.column-1;
-        setPane('input');source.focus();source.setSelectionRange(offset,offset+1);scrollToOffset(offset);
-      };box.append(jump);
-    }
-    $('result-status').textContent='Invalid input';$('result-count').textContent='—';$('input-type').textContent='AUTO';controls();setPane('output');
-  }
-  function format() {
-    clearTimeout(searchTimer);query='';search.value='';$('search-count').textContent='';
-    try {
-      if(bytes(source.value)>MAX_BYTES)throw new Error('Input must be 10 MB or smaller.');
-      result=parser.detect(source.value);dirty=false;indexLines();
-      const output=parser.serialize(result,2);
-      if(result.format==='JSON')source.value=output;
-      updateSource();$('error').hidden=true;$('empty').hidden=true;
-      $('input-type').textContent=result.format;
-      drawTree();tree.hidden=false;setPane('output');
-      const status=$('result-status');status.replaceChildren(el('span','green-dot'),document.createTextNode('Valid '+result.format));
-      $('result-count').textContent=result.format==='JSONL'?result.records.length.toLocaleString()+' records · one record per line':(result.records[0].children?result.records[0].children.length+' '+(result.records[0].kind==='object'?'keys':'items'):'1 value');
-      controls();
-    } catch(error) {showError(error);}
-    saveDraft();
-  }
-  function empty(shouldFocus = true, persist = true) {
-    source.value='';result=null;dirty=false;stickyContext.replaceChildren();stickySignature='';query='';search.value='';clearTimeout(searchTimer);$('search-count').textContent='';tree.replaceChildren();tree.hidden=true;$('error').hidden=true;$('empty').hidden=false;
-    $('input-type').textContent='AUTO';$('result-status').textContent='Ready';$('result-count').textContent='—';updateSource();controls();setPane('input');if(shouldFocus)source.focus();
-    if (persist) saveDraft();
-  }
-  source.addEventListener('input',()=>{dirty=true;updateSource();controls();saveDraft();});
-  source.addEventListener('scroll',()=>{$('gutter').scrollTop=source.scrollTop;});
-  source.addEventListener('keydown',event=>{if(event.key==='Tab'){event.preventDefault();source.setRangeText('  ',source.selectionStart,source.selectionEnd,'end');source.dispatchEvent(new Event('input'));}});
-  document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();format();}});
-  $('format').onclick=format;$('clear').onclick=()=>empty();
-  search.addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{query=search.value.trim().toLocaleLowerCase();drawTree();},180);});
-  $('collapse').onclick=()=>{tree.querySelectorAll('details').forEach(d=>d.open=false);};
-  $('expand').onclick=()=>{
-    // Populate incrementally; keep very large documents responsive.
-    const stack=Array.from(tree.querySelectorAll(':scope > div > details')).reverse();let opened=0;
-    while(stack.length&&opened<EXPAND_BUDGET&&renderCount<EXPAND_BUDGET){const d=stack.pop();d.open=true;d._populate();opened++;const kids=d.querySelectorAll(':scope > .node-children > details');for(let i=kids.length-1;i>=0;i--)stack.push(kids[i]);}
-    if(stack.length||renderCount>=EXPAND_BUDGET)toast('Large documents are partially expanded. Open individual items to see more.');
-  };
-  $('copy').onclick=async()=>{
-    if(!result||dirty)return;
-    const text=parser.serialize(result,2);
-    try {await navigator.clipboard.writeText(text);toast(result.format+' copied to clipboard.');}
-    catch(_) {const helper=el('textarea');helper.value=text;helper.style.cssText='position:fixed;opacity:0';document.body.append(helper);helper.select();const ok=document.execCommand('copy');helper.remove();toast(ok?'Output copied to clipboard.':'Unable to copy. Download the output file instead.');}
-  };
-  $('download').onclick=()=>{
-    if(!result||dirty)return;
-    const blob=new Blob([parser.serialize(result,2)+'\n'],{type:result.format==='JSONL'?'application/x-ndjson;charset=utf-8':'application/json;charset=utf-8'});
-    const url=URL.createObjectURL(blob),link=el('a');link.href=url;link.download=result.format==='JSONL'?'formatted.jsonl':'formatted.json';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Downloading output.');
-  };
-  $('file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try {if(file.size>MAX_BYTES)throw new Error('Choose a file that is 10 MB or smaller.');source.value=await file.text();format();}catch(error){toast(error.message);}event.target.value='';};
-  $('upload-label').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('file').click();}});
-  if(/Mac|iPhone|iPad/.test(navigator.platform)){$('shortcut').textContent='⌘ ↵';}
-  empty(false, false);
-  restoreDraft();
+'use strict';
+const $=id=>document.getElementById(id), source=$('source'), tree=$('tree'), area=$('result-area'), sticky=$('sticky-context');
+let charWidth=8,worker=null,serial=0,loadId=0,viewportId=0,layoutId=0,meta=null,dirty=false,busy=false,query='',toastTimer,searchTimer,frame=0,statsTimer;
+const pending=new Map(),ROW=25,SCROLL_CAP=8000000;
+const el=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
+const pretty=size=>size>=1048576?(size/1048576).toFixed(2)+' MiB':size>=1024?(size/1024).toFixed(1)+' KiB':size+' B';
+function toast(text){clearTimeout(toastTimer);$('toast').textContent=text;$('toast').classList.add('show');toastTimer=setTimeout(()=>$('toast').classList.remove('show'),2500);}
+let draftRevision=0;
+const draftKey=location.pathname.replace(/index\.html$/,'');
+const draftDB=new Promise((resolve,reject)=>{try{const r=indexedDB.open('json-studio-drafts',1);r.onupgradeneeded=()=>r.result.createObjectStore('drafts');r.onsuccess=()=>{r.result.onversionchange=()=>r.result.close();resolve(r.result);};r.onerror=()=>reject(r.error);r.onblocked=()=>reject(Error('Storage blocked'));}catch(e){reject(e);}});
+let draftSaving=false;
+function saveDraft(){++draftRevision;$('draft-status').textContent='Saving…';if(!draftSaving)writeDraft();}
+function writeDraft(){draftSaving=true;const revision=draftRevision,value=source.value;draftDB.then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('drafts','readwrite'),store=tx.objectStore('drafts');value?store.put(value,draftKey):store.delete(draftKey);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);tx.onerror=()=>reject(tx.error);})).then(()=>{if(revision===draftRevision)$('draft-status').textContent=value?'Saved locally':'';}).catch(()=>{if(revision===draftRevision)$('draft-status').textContent='Could not save locally';}).finally(()=>{draftSaving=false;if(revision!==draftRevision)writeDraft();});}
+function restoreDraft(){draftDB.then(db=>new Promise((resolve,reject)=>{const r=db.transaction('drafts').objectStore('drafts').get(draftKey);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);})).then(value=>{if(!draftRevision&&typeof value==='string'&&value){source.value=value;dirty=true;updateSource();$('draft-status').textContent='Saved locally';}}).catch(()=>{$('draft-status').textContent='Local saving unavailable';});}
+let inputLineCount=1,statsRevision=0;
+function updateSource(stats){const revision=++statsRevision;$('source-stats').textContent=stats?stats.lines.toLocaleString()+' lines · '+pretty(stats.bytes):source.value.length.toLocaleString()+' characters';if(stats){inputLineCount=stats.lines;updateGutter();return;}const value=source.value;let position=0,lines=1;function countChunk(){if(revision!==statsRevision)return;const end=Math.min(position+131072,value.length);for(;position<end;position++)if(value.charCodeAt(position)===10)lines++;if(position<value.length)setTimeout(countChunk,0);else{inputLineCount=lines;updateGutter();}}countChunk();}
+function updateGutter(){const gutter=$('gutter');if($('wrap-lines').checked)return;const first=Math.max(0,Math.floor(source.scrollTop/ROW)),count=Math.max(0,Math.min(inputLineCount-first,Math.ceil(source.clientHeight/ROW)+2));gutter.replaceChildren();const content=el('div','input-line-numbers',Array.from({length:count},(_,i)=>first+i+1).join('\n'));content.style.transform='translateY('+ (-(source.scrollTop%ROW))+'px)';gutter.append(content);}
+function controls(){for(const id of ['copy','download','expand','collapse'])$(id).disabled=!meta||dirty||busy;$('search').disabled=!meta||dirty||busy;$('stale').hidden=!dirty||!meta;}
+function setBusy(value,message=''){busy=value;$('work-status').hidden=!value;$('work-message').textContent=message;controls();}
+function setPane(next,focus=false){for(const name of ['input','output']){const active=name===next;$(name+'-panel').hidden=!active;$(name+'-tab').classList.toggle('selected',active);$(name+'-tab').setAttribute('aria-selected',String(active));$(name+'-tab').tabIndex=active?0:-1;}if(focus)$(next+'-tab').focus();if(next==='output')requestView();else updateGutter();}
+function activate(next,focus=false){if(next==='output'&&(dirty||!meta)&&!busy){if(source.value.trim())format();else setPane('output');}else setPane(next,focus);}
+for(const name of ['input','output'])$(name+'-tab').onclick=()=>activate(name);
+document.querySelector('.workspace-tablist').onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();activate(e.key==='Home'?'input':e.key==='End'?'output':$('input-panel').hidden?'input':'output',true);};
+function stopWorker(){if(worker)worker.terminate();worker=null;for(const request of pending.values())request.reject(Error('Operation cancelled.'));pending.clear();loadId=viewportId=layoutId=0;}
+function startWorker(){stopWorker();worker=new Worker('./worker.js');worker.onmessage=({data:m})=>{
+ if(m.type==='progress'){if(m.id===loadId||pending.has(m.id))setBusy(true,m.message);return;}
+ if(m.type==='error'){if(pending.has(m.id)){pending.get(m.id).reject(Error(m.error.message));pending.delete(m.id);setBusy(false);}else if(m.id===loadId){showError(m.error);setBusy(false);}return;}
+ if(m.type==='ready'&&m.id===loadId){if(m.input!==undefined){source.value=m.input;saveDraft();}meta=m.meta;dirty=false;query='';$('search').value='';$('search-count').textContent='';applyMeta();updateSource(m);$('error').hidden=true;$('empty').hidden=true;tree.hidden=false;setBusy(false);area.scrollTop=0;setPane('output');configure();}
+ if(m.type==='layout'&&m.id===layoutId){meta=m.meta;query=meta.query;applyMeta();setBusy(false);requestView();}
+ if(m.type==='viewport'&&m.id===viewportId){renderView(m);}
+ if(m.type==='export'&&pending.has(m.id)){pending.get(m.id).resolve(m);pending.delete(m.id);setBusy(false);}
+};worker.onerror=e=>{showError({message:e.message||'Background processing failed. Try a smaller file or reload this page.'});stopWorker();setBusy(false);};}
+function layoutSettings(){const probe=el('span','font-probe','0000000000');tree.append(probe);charWidth=probe.getBoundingClientRect().width/10||8;probe.remove();const gutter=(parseFloat(getComputedStyle(document.querySelector('.workspace')).getPropertyValue('--number-width'))||(innerWidth<=700?42:52))+(innerWidth<=700?22:24);return {columns:Math.max(8,Math.floor((area.clientWidth-gutter-24)/charWidth)) ,wrap:$('wrap-lines').checked,query};}
+function format(file){clearTimeout(searchTimer);query='';$('search').value='';startWorker();meta=null;dirty=true;tree.replaceChildren();sticky.replaceChildren();tree.hidden=true;$('error').hidden=true;$('empty').hidden=true;setPane('output');setBusy(true,file?'Reading file…':'Parsing input…');loadId=++serial;worker.postMessage({type:'load',id:loadId,text:file?undefined:source.value,file,layout:layoutSettings()});if(!file)saveDraft();}
+function applyMeta(){document.querySelector('.workspace').style.setProperty('--number-width',Math.max(innerWidth<=700?42:52,String(meta.totalLines).length*8+12)+'px');const full=meta.visualLines*ROW;tree.style.height=Math.min(full,SCROLL_CAP)+'px';tree.style.minWidth=$('wrap-lines').checked?'0':Math.min(SCROLL_CAP,meta.maxColumns*charWidth+100)+'px';$('input-type').textContent=meta.format;$('result-status').textContent='Valid '+meta.format;$('result-count').textContent=meta.totalLines.toLocaleString()+' lines · '+meta.nodes.toLocaleString()+' nodes';$('search-count').textContent=query?meta.matches.toLocaleString()+' matches':'';controls();}
+function configure(action,id){if(!worker||!meta)return;if(action==='collapse'){query='';$('search').value='';}viewportId=0;setBusy(true,query?'Searching…':'Updating view…');layoutId=++serial;worker.postMessage({type:'layout',id:layoutId,layout:{...layoutSettings(),action,id}});}
+function logicalOffset(){if(!meta)return 0;const full=meta.visualLines*ROW,range=Math.max(0,full-area.clientHeight),physical=Math.max(1,Math.min(full,SCROLL_CAP)-area.clientHeight);return Math.min(range,area.scrollTop/physical*range);}
+function scrollToVisual(visual){const full=meta.visualLines*ROW,range=Math.max(1,full-area.clientHeight),physical=Math.max(0,Math.min(full,SCROLL_CAP)-area.clientHeight);area.scrollTop=Math.min(physical,visual*ROW/range*physical);requestView();}
+function horizontalOffset(){if(!meta||$('wrap-lines').checked)return 0;const full=meta.maxColumns*charWidth+100;return area.scrollLeft/Math.max(1,Math.min(full,SCROLL_CAP)-area.clientWidth)*Math.max(0,full-area.clientWidth);}
+function requestView(){if(frame)return;frame=requestAnimationFrame(()=>{frame=0;if(!worker||!meta||busy||$('output-panel').hidden)return;const start=Math.max(0,Math.floor(logicalOffset()/ROW)-6);viewportId=++serial;worker.postMessage({type:'viewport',id:viewportId,start,anchor:Math.floor(logicalOffset()/ROW),horizontal:horizontalOffset()/charWidth,count:Math.ceil(area.clientHeight/ROW)+18});});}
+function appendToken(code,token){const span=el('span',token.type);if(!query){span.textContent=token.text;}else{const lower=token.text.toLocaleLowerCase();let p=0,index;while((index=lower.indexOf(query,p))>=0){span.append(document.createTextNode(token.text.slice(p,index)),el('mark','',token.text.slice(index,index+query.length)));p=index+query.length;}span.append(document.createTextNode(token.text.slice(p)));}code.append(span);}
+function buildRow(row,pinned=false){const line=el('div','editor-line virtual-line'+(pinned?' context-line':''));line.dataset.line=row.line;line.dataset.node=row.id;line.style.setProperty('--bracket',['#ffd100','#d565d0','#1795ff'][row.depth%3]);const number=el('span','line-number',row.fragment?'':String(row.line));number.setAttribute('aria-hidden','true');const fold=el('button','fold-control',row.container&&!row.close&&!row.fragment?(row.open?'⌄':'›'):'');fold.disabled=!row.container||row.close||!!row.fragment;if(fold.disabled){fold.setAttribute('aria-hidden','true');fold.tabIndex=-1;}fold.setAttribute('aria-label',(row.open?'Collapse':'Expand')+' item at line '+row.line);fold.onclick=()=>{if(query){query='';$('search').value='';}configure('toggle',row.id);};const code=el('span','line-code');code.style.setProperty('--depth',Math.min(row.depth,20));row.tokens.forEach(t=>appendToken(code,t));if(!pinned&&!$('wrap-lines').checked){code.style.width=area.clientWidth+'px';code.style.transform='translateX('+(row.clipStart*charWidth-horizontalOffset()+area.scrollLeft)+'px)';}line.append(number,fold,code);if(pinned){fold.textContent='⌃';fold.disabled=false;fold.setAttribute('aria-label','Go to parent at line '+row.line);fold.onclick=()=>scrollToVisual(row.target);code.tabIndex=0;code.setAttribute('role','button');code.title='Go to this parent';code.onclick=()=>scrollToVisual(row.target);code.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToVisual(row.target);}};}return line;}
+function renderView(message){const offset=logicalOffset(),physical=area.scrollTop;tree.replaceChildren();for(const row of message.rows){const element=buildRow(row);element.style.top=(row.visual*ROW-offset+physical)+'px';tree.append(element);}sticky.replaceChildren();if(message.parents.length){const panel=el('div','sticky-panel');message.parents.forEach(row=>panel.append(buildRow(row,true)));sticky.append(panel);}}
+function showError(error){meta=null;dirty=true;tree.replaceChildren();tree.hidden=true;sticky.replaceChildren();$('empty').hidden=true;const box=$('error');box.replaceChildren(el('strong','','Check your JSON syntax'),el('div','',error.message));box.hidden=false;if(error.line){box.append(el('div','','Line '+error.line+' · Column '+error.column));const jump=el('button','','Go to error');jump.onclick=()=>{setPane('input');source.focus();let pos=error.position||0;if(error.isJSONL){let line=1;pos=0;while(line<error.line&&pos<source.value.length)if(source.value[pos++]==='\n')line++;pos+=(error.column||1)-1;}source.setSelectionRange(pos,pos+1);};box.append(jump);}$('result-status').textContent='Invalid input';$('result-count').textContent='—';controls();setPane('output');}
+function clear(){stopWorker();meta=null;dirty=false;source.value='';query='';$('search').value='';$('search-count').textContent='';tree.replaceChildren();tree.style.height='0';tree.hidden=true;sticky.replaceChildren();$('error').hidden=true;$('empty').hidden=false;setBusy(false);$('input-type').textContent='AUTO';$('result-status').textContent='Ready';$('result-count').textContent='—';updateSource();setPane('input');saveDraft();source.focus();}
+source.oninput=()=>{if(busy){stopWorker();setBusy(false);}dirty=true;controls();clearTimeout(statsTimer);statsTimer=setTimeout(()=>updateSource(),100);saveDraft();};
+source.onscroll=updateGutter;
+source.onkeydown=e=>{if(e.key==='Tab'){e.preventDefault();source.setRangeText('  ',source.selectionStart,source.selectionEnd,'end');source.dispatchEvent(new Event('input'));}};
+$('format').onclick=()=>format();$('clear').onclick=clear;$('cancel-work').onclick=()=>{stopWorker();meta=null;dirty=true;setBusy(false);tree.hidden=true;sticky.replaceChildren();$('empty').hidden=false;$('result-status').textContent='Cancelled';setPane('input');toast('Processing cancelled. Your input is kept.');};
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();format();}});
+$('search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{query=$('search').value.trim().toLocaleLowerCase();area.scrollTop=0;configure();},180);};
+$('expand').onclick=()=>configure('expand');$('collapse').onclick=()=>configure('collapse');
+function exportData(download){return new Promise((resolve,reject)=>{const id=++serial;pending.set(id,{resolve,reject});worker.postMessage({type:'export',id,download});});}
+$('copy').onclick=async()=>{if(!meta||dirty||busy)return;try{const task=exportData(false);if(navigator.clipboard?.write&&window.ClipboardItem){await navigator.clipboard.write([new ClipboardItem({'text/plain':task.then(r=>r.blob)})]);}else{const {blob}=await task;await navigator.clipboard.writeText(await blob.text());}toast('Output copied to clipboard.');}catch(e){toast(e.message||'Unable to copy. Download the output instead.');}};
+$('download').onclick=async()=>{if(!meta||dirty||busy)return;try{const {blob,format}=await exportData(true);const url=URL.createObjectURL(blob),a=el('a');a.href=url;a.download=format==='JSONL'?'formatted.jsonl':'formatted.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}catch(e){toast(e.message);}};
+$('file').onchange=e=>{const file=e.target.files[0];if(file)format(file);e.target.value='';};
+$('upload-label').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('file').click();}};
+$('theme-toggle').onclick=()=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';$('theme-toggle').setAttribute('aria-pressed',String(dark));requestView();};
+$('wrap-lines').onchange=()=>{document.querySelector('.workspace').classList.toggle('wrap-lines',$('wrap-lines').checked);source.wrap=$('wrap-lines').checked?'soft':'off';area.scrollLeft=0;updateGutter();configure();};
+area.onscroll=requestView;new ResizeObserver(()=>{if(meta&&!busy)configure();}).observe(area);
+if(/Mac|iPhone|iPad/.test(navigator.platform))$('shortcut').textContent='⌘ ↵';
+controls();updateSource();restoreDraft();
 })();

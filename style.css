@@ -139,3 +139,30 @@ html[data-theme="dark"] body{background:var(--editor);color:var(--fg);font-famil
 .output-pane{position:relative}
 .sticky-context{position:absolute;top:38px;left:0;right:7px;height:auto;pointer-events:none}
 .sticky-panel{position:relative;pointer-events:auto}
+
+/* Output mounts only the requested visual-line window. */
+#tree{position:relative;padding:0}
+#tree .virtual-line{position:absolute;left:0;height:25px;min-height:25px;overflow:visible}
+#tree .virtual-line .line-code,.sticky-context .virtual-line .line-code{padding-left:calc(var(--depth)*2ch);white-space:pre;overflow:hidden;line-height:25px}
+#tree .virtual-line .line-code:before,.sticky-context .virtual-line .line-code:before{width:calc(var(--depth)*2ch);background-size:2ch 100%;background-image:linear-gradient(to right,var(--guide) 1px,transparent 1px)}
+#tree .virtual-line .fold-control,.sticky-context .fold-control{position:sticky;left:52px;height:25px;width:24px;padding:0;border:0;border-radius:0;background:var(--gutter-bg);color:var(--gutter-fg);font-size:17px;line-height:25px;z-index:2}
+#tree .fold-control:disabled{opacity:1;cursor:default}
+.sticky-context .virtual-line{position:relative;height:25px}
+.sticky-context .line-code{cursor:pointer}
+[data-theme="light"] .virtual-line .bracket{color:#7256aa}
+[data-theme="dark"] .virtual-line .bracket{color:var(--bracket)}
+.virtual-line .node-meta{font-size:10px}
+.virtual-line .value-string{white-space:pre}
+.virtual-line mark{background:#ffedaa;color:inherit}
+[data-theme="dark"] .virtual-line mark{background:#ffd100;color:#1d1d1d}
+.font-probe{position:fixed;visibility:hidden;white-space:pre;font:13px/25px ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
+.work-status{position:absolute;top:38px;left:0;right:0;z-index:10;padding:12px 16px;background:#faf9fd;border-bottom:1px solid #dfe0e8;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.work-status button{border:1px solid #a0a0a0;padding:4px 12px;font-size:12px}
+[data-theme="dark"] .work-status{background:#252526;border-color:#383838;color:#c5c5c5}
+.input-line-numbers{font:inherit;white-space:pre}
+#result-area:focus-visible{outline:1px solid #91d7fe;outline-offset:-1px}
+@media(max-width:700px){#tree .virtual-line .fold-control,.sticky-context .fold-control{left:42px;width:22px}}
+#tree{overflow:clip}
+#tree .editor-line,.sticky-context .editor-line{grid-template-columns:var(--number-width,52px) 24px minmax(0,1fr)}
+#tree .virtual-line .fold-control,.sticky-context .fold-control{left:var(--number-width,52px)}
+@media(max-width:700px){#tree .editor-line,.sticky-context .editor-line{grid-template-columns:var(--number-width,42px) 22px minmax(0,1fr)}}

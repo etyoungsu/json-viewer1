@@ -12,7 +12,8 @@
   function parseOne(source) {
     let p = 0;
     const fail = message => { throw new ParseError(message, source, p); };
-    const ws = () => { while (/[\x20\t\n\r]/.test(source[p] || '\0')) p++; };
+    const ws = () => { while (true) {const c=source.charCodeAt(p);if(c===32||c===9||c===10||c===13)p++;else break;} };
+    const numberPattern=/-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
     function string() {
       const start = p++;
       while (p < source.length) {
@@ -52,7 +53,8 @@
         fail('Expected a closing bracket.');
       }
       for (const word of ['true','false','null']) if (source.startsWith(word,p)) { p += word.length; return {kind:word==='null'?'null':'boolean',raw:word}; }
-      const number = source.slice(p).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      numberPattern.lastIndex=p;
+      const number = numberPattern.exec(source);
       if (number) { p += number[0].length; return {kind:'number',raw:number[0]}; }
       fail(p >= source.length ? 'Expected a JSON value.' : 'Invalid JSON value. Check brackets and double quotes.');
     }
@@ -63,16 +65,17 @@
     if (!source.trim()) throw new ParseError('Paste JSON or JSONL to get started.', source, 0);
     let jsonError;
     try { return {format:'JSON', records:[parseOne(source)]}; } catch (e) { if (!(e instanceof ParseError)) throw e; jsonError = e; }
-    const lines = source.split(/\r\n|\n|\r/);
-    const nonempty = lines.map((text,i)=>({text,line:i+1})).filter(x=>x.text.trim());
-    if (nonempty.length < 2) throw jsonError;
-    // An opening brace on its own is a multiline JSON document, not a JSONL record.
-    try { parseOne(nonempty[0].text); } catch (_) { throw jsonError; }
-    const records = [];
-    for (const item of nonempty) {
-      try { records.push(parseOne(item.text)); }
-      catch (e) { if (!(e instanceof ParseError)) throw e; e.line = item.line; e.isJSONL = true; throw e; }
+    function* recordsByLine() {
+      const separator=/\r\n|\n|\r/g;let start=0,line=1,match;
+      while((match=separator.exec(source))){const text=source.slice(start,match.index);if(text.trim())yield {text,line};start=separator.lastIndex;line++;}
+      const text=source.slice(start);if(text.trim())yield {text,line};
     }
+    const records=[];
+    for(const item of recordsByLine()){
+      try { records.push(parseOne(item.text)); }
+      catch(e){if(!records.length)throw jsonError;if(!(e instanceof ParseError))throw e;e.line=item.line;e.isJSONL=true;throw e;}
+    }
+    if(records.length<2)throw jsonError;
     return {format:'JSONL',records};
   }
   function stringify(node, indent = 2, depth = 0) {

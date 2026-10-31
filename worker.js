@@ -1,6 +1,6 @@
 'use strict';
-const BUILD_VERSION='acd28c9f12f402c0';
-importScripts('./parser.js?v=acd28c9f12f402c0','./markdown.js?v=acd28c9f12f402c0','./tree-model.js?v=acd28c9f12f402c0');
+const BUILD_VERSION='3a9a96783f85033e';
+importScripts('./parser.js?v=3a9a96783f85033e','./markdown.js?v=3a9a96783f85033e','./tree-model.js?v=3a9a96783f85033e');
 let model=null;
 self.onmessage=async({data:m})=>{
   const reply=(type,payload={})=>self.postMessage({version:BUILD_VERSION,type,id:m.id,...payload});

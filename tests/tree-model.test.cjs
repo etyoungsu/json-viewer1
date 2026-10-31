@@ -10,7 +10,7 @@ m.configure({action:'collapse'});assert.equal(m.rows.length,1);
 m.configure({query:'value'});assert.equal(m.matches,1);assert(m.viewport(0,100).rows.some(r=>r.line===stableLine));
 m.configure({query:'',action:'expand'});assert.equal(m.nodes[target.id].start,stableLine);
 assert(parser.serialize(m.result).includes('9007199254740993'));
-console.log('PASS line coordinates, folding, filtering and lossless values');
+console.log('PASS line coordinates, folding, search navigation and lossless values');
 m=new TreeModel(parser.detect('42\n{"a":[]}\nnull'));
 assert.equal(m.result.format,'JSONL');assert.equal(m.roots.length,3);assert.equal(m.totalLines,5);
 console.log('PASS JSONL scalar and empty-container records');

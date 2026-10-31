@@ -29,7 +29,7 @@ class TreeModel {
     else tokens.push({type:'value-'+n.kind,text:n.raw});
     return tokens;
   }
-  isOpen(item){return this.query?!!this.included[item.id]:item.expanded;}
+  isOpen(item){return item.expanded||!!(this.query&&this.included[item.id]);}
   searchableFields(item){
     const fields=[];let text='';
     for(const token of this.tokens(item)){
@@ -65,7 +65,7 @@ class TreeModel {
       }
       this.rows.push(row);visual+=count;
     };
-    const walk=id=>{const item=this.nodes[id];if(q&&!this.included[id])return;add(item,false);if(item.children.length&&this.isOpen(item)){item.children.forEach(walk);add(item,true);}};
+    const walk=id=>{const item=this.nodes[id];add(item,false);if(item.children.length&&this.isOpen(item)){item.children.forEach(walk);add(item,true);}};
     this.roots.forEach(walk);this.visualLines=visual;this.matches=this.hits.length;
     const retained=previous?this.hits.findIndex(hit=>hit.id===previous.id&&hit.offset===previous.offset):-1;
     this.activeIndex=retained>=0?retained:this.hits.length?0:-1;

@@ -1,6 +1,6 @@
 (() => {
 'use strict';
-const BUILD_VERSION='acd28c9f12f402c0';
+const BUILD_VERSION='3a9a96783f85033e';
 const $=id=>document.getElementById(id), source=$('source'), tree=$('tree'), area=$('result-area'), sticky=$('sticky-context');
 let charWidth=8,worker=null,serial=0,loadId=0,viewportId=0,layoutId=0,navigationId=0,queuedSteps=0,jumpAfterLayout=false,meta=null,dirty=false,busy=false,query='',toastTimer,searchTimer,frame=0,statsTimer;
 const pending=new Map(),ROW=25,SCROLL_CAP=8000000;
@@ -24,7 +24,7 @@ function activate(next,focus=false){if(next==='output'&&(dirty||!meta)&&!busy){i
 for(const name of ['input','output'])$(name+'-tab').onclick=()=>activate(name);
 document.querySelector('.workspace-tablist').onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();activate(e.key==='Home'?'input':e.key==='End'?'output':$('input-panel').hidden?'input':'output',true);};
 function stopWorker(){if(worker)worker.terminate();worker=null;for(const request of pending.values())request.reject(Error('Operation cancelled.'));pending.clear();loadId=viewportId=layoutId=navigationId=0;queuedSteps=0;jumpAfterLayout=false;}
-function startWorker(){stopWorker();worker=new Worker('./worker.js?v=acd28c9f12f402c0');worker.onmessage=({data:m})=>{
+function startWorker(){stopWorker();worker=new Worker('./worker.js?v=3a9a96783f85033e');worker.onmessage=({data:m})=>{
  if(m.version!==BUILD_VERSION||((m.type==='ready'||m.type==='layout')&&typeof m.meta?.markdown!=='boolean')){showError({message:'Application files are out of date. Replace all deployment files and reload the page.'});stopWorker();setBusy(false);return;}
  if(m.type==='progress'){if(m.id===loadId||pending.has(m.id))setBusy(true,m.message);return;}
  if(m.type==='error'){if(pending.has(m.id)){pending.get(m.id).reject(Error(m.error.message));pending.delete(m.id);setBusy(false);}else if(m.id===loadId){showError(m.error);setBusy(false);}return;}
